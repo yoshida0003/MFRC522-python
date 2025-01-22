@@ -157,3 +157,5 @@ if __name__ == '__main__':
         connection.close()
         pwm.stop()
         GPIO.cleanup()
+
+        # プログラム終了時にLEDを消灯

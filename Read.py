@@ -1,34 +1,22 @@
-#!/usr/bin/env python
-# -*- coding: utf8 -*-
-#
-#    Copyright 2014,2018 Mario Gomez <mario.gomez@teubi.co>
-#
-#    This file is part of MFRC522-Python
-#    MFRC522-Python is a simple Python implementation for
-#    the MFRC522 NFC Card Reader for the Raspberry Pi.
-#
-#    MFRC522-Python is free software: you can redistribute it and/or modify
-#    it under the terms of the GNU Lesser General Public License as published by
-#    the Free Software Foundation, either version 3 of the License, or
-#    (at your option) any later version.
-#
-#    MFRC522-Python is distributed in the hope that it will be useful,
-#    but WITHOUT ANY WARRANTY; without even the implied warranty of
-#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#    GNU Lesser General Public License for more details.
-#
-#    You should have received a copy of the GNU Lesser General Public License
-#    along with MFRC522-Python.  If not, see <http://www.gnu.org/licenses/>.
-#
-
 import RPi.GPIO as GPIO
 import MFRC522
 import signal
+import time
+import mysql.connector  # MySQLライブラリのインポート
+import uuid
+import hashlib
+from flask import Flask, request, jsonify
+from flask_socketio import SocketIO, emit
+from flask_cors import CORS
+
+app = Flask(__name__)
+CORS(app)  # CORSを有効にする
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 continue_reading = True
 
 # Capture SIGINT for cleanup when the script is aborted
-def end_read(signal,frame):
+def end_read(signal, frame):
     global continue_reading
     print("Ctrl+C captured, ending read.")
     continue_reading = False
@@ -37,45 +25,135 @@ def end_read(signal,frame):
 # Hook the SIGINT
 signal.signal(signal.SIGINT, end_read)
 
+# GPIOの初期化
+GPIO.setmode(GPIO.BOARD)
+
+# MySQLデータベースへの接続設定
+db_config = {
+    'user': 'root',  # MySQLのユーザー名
+    'password': 'yossy0508',  # MySQLのパスワード
+    'host': 'localhost',
+    'database': 'io',
+}
+
+# MySQLに接続
+try:
+    connection = mysql.connector.connect(**db_config)
+    cursor = connection.cursor()
+except mysql.connector.Error as err:
+    print(f'Error: {err}')
+
+# GPIOのモードをBOARDに設定
+GPIO.setmode(GPIO.BOARD)
+GPIO.setwarnings(False)
+
+# サーボモータ制御用のピンの設定
+servo_pin = 12  # BOARDモードでの12番ピン
+
+# GPIOのモードとピンの設定
+GPIO.setup(servo_pin, GPIO.OUT)
+
+# PWMの設定
+pwm = GPIO.PWM(servo_pin, 50)  # 50Hz
+pwm.start(0)
+
+# LEDピンの設定 (BOARDモード)
+LED_RED = 5   # BOARDモードでの5番ピン
+LED_GREEN = 7 # BOARDモードでの7番ピン
+RFID_UID = [3, 176, 167, 19, 7]
+password = "yossy0508"
+
+def set_angle(angle):   
+    duty = angle / 18 + 2
+    GPIO.output(servo_pin, True)
+    pwm.ChangeDutyCycle(duty)
+    time.sleep(1)
+    GPIO.output(servo_pin, False)
+    pwm.ChangeDutyCycle(0)
+
+def turn_led_on(led):
+    GPIO.setup(led, GPIO.OUT)
+    GPIO.output(led, GPIO.HIGH)
+
+def turn_led_off(led):
+    GPIO.setup(led, GPIO.OUT)
+    GPIO.output(led, GPIO.LOW)
+
+def turn_red_on():
+    turn_led_off(LED_GREEN)
+    turn_led_on(LED_RED)
+
+def turn_green_on():
+    turn_led_off(LED_RED)
+    turn_led_on(LED_GREEN)
+
+def blink_red(duration):
+    for _ in range(duration * 2):
+        turn_led_on(LED_RED)
+        time.sleep(0.5)
+        turn_led_off(LED_RED)
+        time.sleep(0.5)
+    turn_red_on()  # 最後に赤ランプを点灯したままにする
+
 # Create an object of the class MFRC522
 MIFAREReader = MFRC522.MFRC522()
 
-# Welcome message
-print("Welcome to the MFRC522 data read example")
-print("Press Ctrl-C to stop.")
+@app.route('/scan', methods=['POST'])
+def scan():
+    global continue_reading
+    continue_reading = True
+    while continue_reading:
+        # Scan for cards    
+        (status, TagType) = MIFAREReader.MFRC522_Request(MIFAREReader.PICC_REQIDL)
 
-# This loop keeps checking for chips. If one is near it will get the UID and authenticate
-while continue_reading:
-    
-    # Scan for cards    
-    (status,TagType) = MIFAREReader.MFRC522_Request(MIFAREReader.PICC_REQIDL)
-
-    # If a card is found
-    if status == MIFAREReader.MI_OK:
-        print("Card detected")
-    
-    # Get the UID of the card
-    (status,uid) = MIFAREReader.MFRC522_Anticoll()
-
-    # If we have the UID, continue
-    if status == MIFAREReader.MI_OK:
-
-        # Print UID
-        print("Card read UID: {},{},{},{}".format(uid[0], uid[1], uid[2], uid[3]))
-    
-        # This is the default key for authentication
-        key = [0xFF,0xFF,0xFF,0xFF,0xFF,0xFF]
-        
-        # Select the scanned tag
-        MIFAREReader.MFRC522_SelectTag(uid)
-
-        # Authenticate
-        status = MIFAREReader.MFRC522_Auth(MIFAREReader.PICC_AUTHENT1A, 8, key, uid)
-
-        # Check if authenticated
+        # If a card is found
         if status == MIFAREReader.MI_OK:
-            MIFAREReader.MFRC522_Read(8)
-            MIFAREReader.MFRC522_StopCrypto1()
-        else:
-            print("Authentication error")
+            print("Card detected")
+        
+            # Get the UID of the card
+            (status, uid) = MIFAREReader.MFRC522_Anticoll()
 
+            # If we have the UID, continue
+            if status == MIFAREReader.MI_OK:
+                # UIDをカンマ区切りの文字列に変換
+                uid_str = ','.join(map(str, uid))
+                
+                # データベースにUIDが存在するか確認
+                cursor.execute("SELECT name FROM auth WHERE rfid_uid = %s", (uid_str,))
+                result = cursor.fetchone()
+
+                if result:
+                    name = result[0]
+                    print('バッジ {} が許可されました！名前: {}'.format(uid_str, name))  # バッジが許可されたことを表示
+
+                    turn_green_on()  # 緑ランプを点灯
+                    turn_led_off(LED_RED)  # 赤ランプを消灯
+
+                    # サーボを90度に設定
+                    set_angle(90)
+                    time.sleep(10)
+                    set_angle(0)
+
+                    turn_red_on()  # サーボモータが元の位置に戻った後に赤ランプを点灯
+                    turn_led_off(LED_GREEN)  # 緑ランプを消灯
+
+                    # フロントエンドに結果を送信
+                    socketio.emit('scan_result', {'message': 'おかえりなさい！', 'name': name})
+                    return jsonify({'message': 'おかえりなさい！', 'name': name}), 200
+                else:
+                    print('バッジ {} は許可されていません！'.format(uid_str))
+                    blink_red(10)  # 10秒間赤ランプを点滅
+                    return jsonify({'message': 'バッジ {} は許可されていません！'.format(uid_str)}), 403
+
+    return jsonify({'message': 'スキャンが中断されました'}), 500
+
+if __name__ == '__main__':
+    try:
+        socketio.run(app, host='0.0.0.0', port=5000)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cursor.close()
+        connection.close()
+        pwm.stop()
+        GPIO.cleanup()
